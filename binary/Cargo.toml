@@ -10,5 +10,9 @@ aes = "0.8.3"
 anyhow = "1.0.75"
 axum = "0.6.20"
 formatx = "0.2.1"
+hex = "0.4.3"
+len-trait = "0.6.1"
+rand = "0.8.5"
+random-string = "1.0.1"
 serde = { version = "1.0.190", features = ["derive"] }
 tokio = { version = "1.33.0", features = ["net", "rt", "macros", "rt-multi-thread"] }
