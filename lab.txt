@@ -1,0 +1,19 @@
+- copy code from slack and make it code in first cell in Lab2_1a Instruction power differences
+- each code in slack goes in sequential cells
+>>>> this code is the code what will be run on the victim and capured by capture_trace() <<<<
+
+hardware/victims/firmware/simpleserial-base-lab2/simpleserialbase.c
+> get_pt() {
+> trigger_high()
+> ...
+> [copy volitile uint8_t A stuff from Lab2_1a here]
+> trigger_low()
+> [don't comment out simpleserial_put('r', 16, pt) here]
+> }
+
+write up will be to explore
+- Instruction power differences (exploration)
+21b
+3
+3_3
+
