@@ -1,7 +1,11 @@
+use std::rc::Rc;
+use std::sync::Arc;
+
 // use aes::Aes128;
 use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
 use aes::Aes128;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
+use axum::extract::State;
 use axum::{
     http::HeaderMap,
     response::Html,
@@ -11,20 +15,167 @@ use axum::{
 use formatx::*;
 use len_trait::Len;
 use rand::Rng;
+use tokio::sync::Mutex;
 
 type Partial = Html<&'static str>;
 
 const KEY_LEN: usize = 16;
+const BLOCK_SIZE: usize = 16;
+
+// fn get_right_port(ports: Vec<serialport::SerialPortInfo>) -> Option<Vec<serialport::SerialPortInfo>> {
+//     return ports.into_iter().filter(
+//         |port| {
+//             match (port.port_type) {
+//                 serialport::UsbPort(info) => match (info.vid, info.manufacturer) {
+//                     (1027, Some("Future Technology Devices International, Ltd")) => true,
+//                     _ => Some,
+//                     },
+//                 _ => false
+//             }
+//         }
+//     );
+// }
+
+#[derive(Clone)]
+struct Uart {
+    port: Arc<Mutex<Box<dyn serialport::SerialPort>>>,
+    key: Option<[u8; KEY_LEN]>,
+}
+
+impl Uart {
+    fn init(port_name: String) -> Result<Self> {
+        let mut p = serialport::new(&port_name, 9600)
+            .open()
+            .context("can open port")?;
+        return Ok(Self {
+            port: Arc::new(Mutex::new(p)),
+            key: None,
+        });
+    }
+
+    async fn set_key(&mut self, key: Option<&str>) -> Result<()> {
+        let key = match key {
+            Some(key) => key,
+            None => return Ok(())
+        };
+        let mut key_arr = [0; KEY_LEN];
+        for (i, b) in key.bytes().enumerate() {
+            key_arr[i] = b;
+        }
+        self.key = Some(key_arr);
+        // FIXME: how will basys signal success?
+        let mut port = self.port.lock().await;
+        port.write_all(&key_arr)?;
+        Ok(())
+    }
+
+    fn encrypt_no_uart(&self, pt: &str) -> Result<String> {
+        type Block = GenericArray<u8, aes::cipher::typenum::U16>;
+
+        let key = match self.key {
+            Some(key) => GenericArray::from(key),
+            None => return Err(anyhow!("Key not set")),
+        };
+
+        let num_blocks = (pt.len() + KEY_LEN) / KEY_LEN;
+        let mut blocks = vec![Block::default(); num_blocks];
+        let pt_bytes = pt.as_bytes();
+
+        for i in (0..pt.len()).step_by(KEY_LEN) {
+            let bytes = &pt_bytes[i..usize::min(i + KEY_LEN, pt.len() - 1)];
+            let block = &mut blocks[i / KEY_LEN];
+
+            for b in 0..bytes.len() {
+                // dbg!("{} {} {}", b, block.len(), bytes.len());
+                block[b] = bytes[b]
+            }
+        }
+
+        let cipher = Aes128::new(&key);
+        cipher.encrypt_blocks(&mut blocks);
+
+        let ct: Vec<u8> = blocks.into_iter().flatten().collect();
+
+        Ok(hex::encode_upper(ct))
+    }
+
+    async fn encrypt_uart(&mut self, pt: &str) -> Result<String> {
+        type Block = [u8; BLOCK_SIZE];
+
+        let num_blocks = (pt.len() + BLOCK_SIZE) / BLOCK_SIZE;
+        let mut blocks = vec![Block::default(); num_blocks];
+        let pt_bytes = pt.as_bytes();
+
+        for i in (0..pt.len()).step_by(BLOCK_SIZE) {
+            let bytes = &pt_bytes[i..usize::min(i + BLOCK_SIZE, pt.len() - 1)];
+            let block = &mut blocks[i / BLOCK_SIZE];
+
+            for b in 0..bytes.len() {
+                // dbg!("{} {} {}", b, block.len(), bytes.len());
+                block[b] = bytes[b]
+            }
+        }
+
+        let mut ct = vec![[0; BLOCK_SIZE]; num_blocks];
+        let mut port = self.port.lock().await;
+
+        for (i, block) in blocks.into_iter().enumerate() {
+            let written = port.write(&block)?;
+            anyhow::ensure!(
+                written == BLOCK_SIZE,
+                "Wrote BLOCK_SIZE ({}) bytes",
+                written
+            );
+            port.read_exact(&mut ct[i])?;
+        }
+
+        let ct = hex::encode_upper(ct.into_iter().flatten().collect::<Vec<u8>>());
+
+        Ok(ct)
+    }
+
+    async fn encrypt(&mut self, pt: &str) -> Result<String> {
+        let uart_res = self.encrypt_uart(pt).await;
+        if let Ok(ct) = uart_res {
+            return Ok(ct);
+        }
+        eprintln!("Failed to encrypt with uart: {:?}", uart_res);
+        return self.encrypt_no_uart(pt);
+    }
+}
 
 #[tokio::main]
 async fn main() {
+    let ports = serialport::available_ports().expect("can look for ports");
+    let mut found = vec![];
+    for port in ports.iter() {
+        match &port.port_type {
+            serialport::SerialPortType::UsbPort(info) => match info.vid {
+                1027 => {
+                    found.push(port.to_owned());
+                }
+                _ => {}
+            },
+            // PciPort ??
+            _ => {}
+        }
+    }
+    dbg!("{:?}", &found);
+
+    if found.len() == 0 {
+        panic!("No basys3 found");
+    }
+
+    let uart = Uart::init(found[0].port_name.clone()).expect("can init uart");
+
     let app = Router::new()
         .route("/", get(render(index())))
         .route("/submit", post(handle_submit))
         .route("/key", post(handle_set_key))
         .route("/encrypt", post(handle_encrypt_message))
         .route("/key/random", get(handle_random_key))
-        .route("/message/random", get(handle_random_message));
+        .route("/message/random", get(handle_random_message))
+        .with_state(uart);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 3000));
 
@@ -40,6 +191,7 @@ pub struct PageFormOpts {
     pub key_err: Option<String>,
     pub message: Option<String>,
     pub ciphertext: Option<String>,
+    pub encrypt_err: Option<String>,
 }
 
 impl PageFormOpts {
@@ -49,6 +201,7 @@ impl PageFormOpts {
             key_err: none_if_empty(self.key_err),
             message: none_if_empty(self.message),
             ciphertext: none_if_empty(self.ciphertext),
+            encrypt_err: none_if_empty(self.encrypt_err),
         }
     }
 }
@@ -60,6 +213,7 @@ impl Default for PageFormOpts {
             key_err: None,
             message: None,
             ciphertext: None,
+            encrypt_err: None,
         };
     }
 }
@@ -92,7 +246,7 @@ async fn handle_submit(headers: HeaderMap, Form(opts): Form<PageFormOpts>) -> Pa
 async fn handle_random_key() -> Partial {
     let key = gen_random_key().into();
 
-    return render(format!("{}{}", key_input(Some(key)), key_error(None, true)));
+    return render(format!("{}{}", key_input(Some(key)), error("key-error",None, true)));
 }
 
 async fn handle_random_message() -> Partial {
@@ -100,40 +254,39 @@ async fn handle_random_message() -> Partial {
     return Html(text.leak());
 }
 
-async fn handle_set_key(Form(opts): Form<PageFormOpts>) -> Partial {
-    let PageFormOpts {
-        key,
-        message,
-        key_err: _,
-        ciphertext,
-    } = opts;
-
-    let (key, key_err) = match validate_key(key.clone()) {
+async fn handle_set_key(State(mut state): State<Uart>, Form(mut opts): Form<PageFormOpts>) -> Partial {
+    let (key, key_err) = match validate_key(opts.key.clone()) {
         Ok(key) => (Some(key), None),
-        Err(err) => (key, Some(err.to_string())),
+        Err(err) => (opts.key.clone(), Some(err.to_string())),
     };
-    render(page_form(PageFormOpts {
-        key,
-        key_err,
-        message,
-        ciphertext,
-    }))
+    opts.key = key;
+    opts.key_err = key_err;
+    // FIXME: don't ignore
+    let _ = state.set_key(opts.key.as_deref()).await;
+    dbg!("{:?}", &opts.key);
+
+    render(page_form(opts))
 }
 
-async fn handle_encrypt_message(Form(opts): Form<PageFormOpts>) -> Partial {
+async fn handle_encrypt_message(State(mut state): State<Uart>, Form(opts): Form<PageFormOpts>) -> Partial {
     let mut opts = opts.clean();
 
-    let key = match validate_key(opts.key.clone()) {
-        Ok(key) => key,
-        Err(err) => {
-            opts.key_err = Some(err.to_string());
-            return render(page_form(opts));
+    match &state.key {
+        Some(_) => {},
+        None => {
+            let _ = state.set_key(opts.key.as_deref()).await;
         }
-    };
-    opts.ciphertext = Some(encrypt_string(
-        &key,
-        opts.message.as_ref().unwrap(),
-    ));
+    }
+
+    if let Some(message) = &opts.message {
+        let ct = state.encrypt(&message).await;
+        let (ct, err) = match ct {
+            Ok(ct) => (Some(ct), None),
+            Err(err) => (None, Some(err.to_string())),
+        };
+        opts.ciphertext = ct;
+        opts.encrypt_err = err;
+    }
 
     return render(page_form(opts));
 }
@@ -150,6 +303,7 @@ fn page_form(
         key_err,
         message,
         ciphertext,
+        encrypt_err
     }: PageFormOpts,
 ) -> TemplateResult {
     formatx!(
@@ -162,7 +316,7 @@ fn page_form(
         "#,
         key_form_group(key, key_err),
         message_form_group(message),
-        cipher_form_group(ciphertext)
+        cipher_form_group(ciphertext, encrypt_err)
     )
     .unwrap()
 }
@@ -183,12 +337,15 @@ fn key_form_group(key: Option<String>, key_err: Option<String>) -> TemplateResul
             {}
         "##,
         key_input(key),
-        key_error(key_err, false)
+        error("key-error", key_err, false)
     )
 }
 
-fn key_error(err: Option<String>, out_of_band: bool) -> TemplateResult {
-    dbg!("{}", true.to_string());
+fn error(id: &str, err: Option<String>, out_of_band: bool) -> String {
+    let label = match err {
+        Some(_) => "ERROR: ",
+        None => "",
+    };
     let err = err.unwrap_or_default();
     let oob = if out_of_band {
         r#"hx-swap-oob="true""#
@@ -197,10 +354,11 @@ fn key_error(err: Option<String>, out_of_band: bool) -> TemplateResult {
     };
     format!(
         r#"
-            <p id="key-error" hx-swap-oob="{}" style="color: #FF0000; font-size: 14px; font-weight: bold; margin-top: 5px;">{}</p>
+            <p id="{}" {} style="color: #FF0000; font-size: 14px; font-weight: bold; margin-top: 5px;">{}{}</p>
     "#,
-        oob, err
+        id, oob, label, err
     )
+
 }
 
 fn key_input(key: Option<String>) -> TemplateResult {
@@ -234,7 +392,7 @@ fn message_form_group(message: Option<String>) -> TemplateResult {
     ).unwrap()
 }
 
-fn cipher_form_group(ct: Option<String>) -> TemplateResult {
+fn cipher_form_group(ct: Option<String>, err: Option<String>) -> TemplateResult {
     let ct = ct.unwrap_or_default();
     format!(
         r##"
@@ -244,9 +402,11 @@ fn cipher_form_group(ct: Option<String>) -> TemplateResult {
                 <button hx-post="/encrypt" hx-target="form" class="block border-2 bg-slate-100">
                    Decrypt (TODO!)
                 </button>
+                {}
             </div>
         "##,
-        ct
+        ct,
+        error("encrypt-error", err, false)
     )
 }
 
@@ -282,36 +442,6 @@ fn gen_random_message() -> String {
         .map(|s| *s)
         .collect();
     return words.join(" ").into();
-}
-
-fn encrypt_string(key: &str, pt: &str) -> String {
-    type Block = GenericArray<u8, aes::cipher::typenum::U16>;
-
-    let mut key_arr = [0; KEY_LEN];
-    for (i, b) in key.bytes().enumerate() {
-        key_arr[i] = b;
-    }
-    let key = GenericArray::from(key_arr);
-
-    let num_blocks = (pt.len() + KEY_LEN) / KEY_LEN;
-    let mut blocks = vec![Block::default(); num_blocks];
-    let pt_bytes = pt.as_bytes();
-
-    for i in (0..pt.len()).step_by(KEY_LEN) {
-        let bytes = &pt_bytes[i..usize::min(i + KEY_LEN, pt.len() - 1)];
-        let block = &mut blocks[i / KEY_LEN];
-
-        for b in 0..bytes.len() {
-            dbg!("{} {} {}", b, block.len(), bytes.len());
-            block[b] = bytes[b]
-        }
-    }
-
-    let cipher = Aes128::new(&key);
-    cipher.encrypt_blocks(&mut blocks);
-
-    let ct: Vec<u8> = blocks.into_iter().flatten().collect();
-    return hex::encode_upper(ct);
 }
 
 fn none_if_empty<S>(s: Option<S>) -> Option<S>
