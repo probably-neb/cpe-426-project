@@ -438,6 +438,19 @@ func (s *BAESys128) Encrypt(msg []byte) ([]byte, error) {
 
 func (s *BAESys128) SetKey(key []byte) error {
     s.key = key;
+    if s.port == nil {
+        log.Println("No port set. Skipping setting key on Basys3")
+        return nil
+    }
+    _, err := s.Write(s.key)
+    if err != nil {
+        log.Printf("Failed to write key to Basys3: <code>%s</code>", err)
+    }
+    // skip key echo
+    readKey := s.Read()
+    if len(readKey) != len(s.key) {
+        log.Printf("Failed to set key on Basys3. Recieved <code>%d</code> bytes in key echo instead of <code>%d</code>", len(readKey), len(s.key))
+    }
     return nil
 }
 
