@@ -2,10 +2,10 @@ name: Build and Commit Binaries
 
 on:
   push:
-    branches:
-      - main
-    # paths:
-    #   - '**/main.go'
+    # branches:
+    #   - main
+    paths:
+      - '**/main.go'
 
 jobs:
   build:
@@ -25,3 +25,5 @@ jobs:
         run: make all
 
       - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: Build binary

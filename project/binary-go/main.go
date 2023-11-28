@@ -18,10 +18,10 @@ type Handler func(http.ResponseWriter, *http.Request)
 
 
 var PORT_MODE = serial.Mode{
-		BaudRate: 9600,
-		Parity:   serial.NoParity,
-		DataBits: 8,
-		StopBits: serial.OneStopBit,
+    BaudRate: 9600,
+    Parity:   serial.NoParity,
+    DataBits: 8,
+    StopBits: serial.OneStopBit,
 }
 const PORT_MODE_STR = "BaudRate: 9600, Parity: NoParity, DataBits: 8, StopBits: OneStopBit"
 
