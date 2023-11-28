@@ -2,8 +2,10 @@ name: Build and Commit Binaries
 
 on:
   push:
-    paths:
-      - '**/main.go'
+    branches:
+      - main
+    # paths:
+    #   - '**/main.go'
 
 jobs:
   build:
@@ -22,11 +24,4 @@ jobs:
         working-directory: project/binary-go
         run: make all
 
-      - name: Commit binaries
-        working-directory: project/binary-go
-        run: |
-          git config user.email "github-actions@github.com"
-          git config user.name "GitHub Actions"
-          git add ./bin
-          git commit -m "Update binaries"
-          git push
+      - uses: stefanzweifel/git-auto-commit-action@v5
