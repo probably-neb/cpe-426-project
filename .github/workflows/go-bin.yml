@@ -1,0 +1,32 @@
+name: Build and Commit Binaries
+
+on:
+  push:
+    paths:
+      - '**/main.go'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.21.4
+
+      - name: Build binaries
+        working-directory: project/binary-go
+        run: make all
+
+      - name: Commit binaries
+        working-directory: project/binary-go
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name "GitHub Actions"
+          git add ./bin
+          git commit -m "Update binaries"
+          git push
