@@ -9,7 +9,7 @@
 
 - [UART Code](https://nandland.com/uart-serial-port-module/)
 - [UART Explanation](https://nandland.com/uart-rs-232-serial-port-com-port/)
-- [AES Code](https://opencores.org/projects/aes-128_pipelined_encryption)
+- [AES Code](https://opencores.org/projects/aes_crypto_core)
 - [Basys UART Docs](https://digilent.com/reference/programmable-logic/basys-3/reference-manual#usb-uart_bridge_serial_port)
 
 ### BINARY
