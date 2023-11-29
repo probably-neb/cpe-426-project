@@ -48,55 +48,110 @@ func (l *Logger) Init() *Logger {
     return l
 }
 
+func (l *Logger) Teardown() error {
+    close(l.msgs)
+    err := l.CloseConn()
+    if err != nil {
+        return err
+    }
+    return nil
+}
+
+func (l *Logger) CloseConn() error {
+    if l.conn == nil {
+        return nil
+    }
+    err := l.conn.Close()
+    if err != nil {
+        return fmt.Errorf("failed to close old websocket connection: %v", err)
+    }
+    return nil
+}
+
 func (l Logger) Write(p []byte) (n int, err error) {
     l.msgs <- string(p)
     fmt.Print(string(p))
     return len(p), nil
 }
 
-func (l* Logger) SetConn(conn *websocket.Conn) {
+func (l* Logger) SetConn(conn *websocket.Conn) error {
+    err := l.CloseConn()
+    if err != nil {
+        return err
+    }
     l.conn = conn
+    return nil
 }
 
 func (l *Logger) handle_ws(w http.ResponseWriter, r *http.Request) {
+    if l.conn != nil {
+        fmt.Println("Closing old websocket connection")
+        return
+    }
     conn, err := upgrader.Upgrade(w, r, nil)
     if err != nil {
-        fmt.Fprintf(w, "%+v\n", err)
+        fmt.Printf("Failed to set websocket connection: %v", err)
+        return
     }
-    l.SetConn(conn)
+    err = l.SetConn(conn)
+    if err != nil {
+        fmt.Printf("Failed to set websocket connection: %v", err)
+        return
+    }
     go l.doLogging()
 }
 
-func (l *Logger) fmtMsg(msg string) string {
-    return fmt.Sprintf(`
-        <div id="log" hx-swap-oob="beforeend">
+func (l *Logger) fmtMsg(w io.Writer, msg string) error {
+    _, err := fmt.Fprintf(w, `
+        <div id="log-messages" hx-swap-oob="beforeend">
             <p class="font-mono">%s</p>
         </div>
     `, msg)
+    return err
+}
+
+func (l *Logger) SendMessage(msg string) error {
+    if l.conn == nil {
+        return fmt.Errorf("no websocket connection set")
+    }
+    writer, err := l.conn.NextWriter(websocket.TextMessage)
+    defer func() {
+        if writer == nil {
+            return
+        }
+        writer.Close()
+    }()
+
+    if err != nil {
+        return fmt.Errorf("failed to create log writer: %v", err)
+    }
+
+    err = l.fmtMsg(writer, msg)
+    if err != nil {
+        return fmt.Errorf("failed to send log message: %v", err)
+    }
+    return nil
 }
 
 func (l *Logger) doLogging() {
-    defer func() {
-        l.conn.Close()
-        l.conn = nil
-    }()
     for {
-        rawMsg, stillOpen := <- l.msgs
+        msg, stillOpen := <- l.msgs
         if !stillOpen {
             return
         }
-        msg := l.fmtMsg(rawMsg)
-        err := l.conn.WriteMessage(websocket.TextMessage, []byte(msg))
+        err := l.SendMessage(msg)
         if err != nil {
             fmt.Println(err)
-            return
         }
+
     }
 }
 
+
 func main() {
     sha := new(BAESys128)
-    logger := new(Logger).Init()
+    var logger = new(Logger).Init()
+    defer logger.Teardown()
 
     ports, err := enumerator.GetDetailedPortsList()
     if err != nil {
@@ -128,13 +183,12 @@ func main() {
     http.HandleFunc("/encrypt", handle_encrypt_message(sha))
     http.HandleFunc("/key/random", handle_random_key)
     http.HandleFunc("/message/random", handle_random_message)
-    http.HandleFunc("/ws", logger.handle_ws)
+    http.HandleFunc("/log", logger.handle_ws)
 
     // Start the server on port 8080
     fmt.Println("Server running on http://localhost:8080")
     log.Println("Server started at <code>http://localhost:8080</code>")
     err = http.ListenAndServe(":8080", nil)
-    close(logger.msgs)
     if err != nil {
         fmt.Printf("Error starting server: %s\n", err)
     }
@@ -171,7 +225,10 @@ func index(w http.ResponseWriter, r *http.Request) {
                 %s
                 <div>
                     <label for="log">System Log</label>
-                    <div hx-ext="ws" ws-connect="/ws" id="log" class="w-[600px] h-[400px] overflow-auto border-2"></div>
+                    <div hx-ext="ws" ws-connect="/log" id="log" class="w-[600px] h-[400px] overflow-auto border-2">
+                        <div id="log-messages">
+                        </div>
+                    </div>
                 </div>
             </div>
         </body>
