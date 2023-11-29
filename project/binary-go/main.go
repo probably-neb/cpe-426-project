@@ -320,8 +320,9 @@ func key_form_group(key *string, key_err *string) string {
 
 func error_p(id string, err *string, out_of_band bool) string {
     label := ""
-    if err != nil {
-        label = "ERROR: "
+    errLabel := "ERROR: "
+    if err != nil && !strings.HasPrefix(*err, errLabel) {
+        label = errLabel
     }
     oob := ""
     if out_of_band {
@@ -345,7 +346,7 @@ func message_form_group(_message *string) string {
     message := empty_if_nil(_message)
     return fmt.Sprintf(`
             <div id="message-part" class="flex flex-col gap-2 py-4">
-                <label for="message">Plain Text:</label>
+                <label for="message">Message</label>
                 <textarea spellcheck="false" type="text" id="message" name="message" class="w-[600px] border-2" rows="4" >%s</textarea>
                 <div class="flex flex-row justify-start gap-2">
                    <button class="border-2 bg-slate-100" hx-get="/message/random" hx-target="#message" hx-swap="innerHTML">
@@ -373,24 +374,29 @@ func cipher_form_group(_ct *string, err *string) string {
         `, ct, error_p("encrypt-error", err, false))
 }
 
-func plaintext_form_group(_pt *string, _same *bool) string {
-    pt := empty_if_nil(_pt)
-    var same string
-    if _same == nil {
-        same = ""
-    } else if *_same {
-        same = fmt.Sprintf(`<p id="decrypt-err">%s</p>`, "Decrypted message is the same as original message!")
-    } else {
-        msg := "Decrypted message is NOT the same as original message!"
-        same = error_p("decrypt-err", &msg, false)
+func same_icon(same *bool) string {
+    if same == nil {
+        return ""
     }
+    color := "[#FF0000]"
+    msg := "Differs from original message"
+    if *same {
+        color = "green-900"
+        msg = "Same as original message"
+    }
+    return fmt.Sprintf(`<p class="text-white border-4 border-%s bg-%s/75 rounded-md px-2">%s</p>`, color, color, msg)
+}
+
+func plaintext_form_group(_pt *string, same *bool) string {
+    pt := empty_if_nil(_pt)
     return fmt.Sprintf(`
             <div id="pt-part" class="flex flex-col gap-2 py-2">
-                <p>Plain Text</p>
+                <div class="flex flex-row gap-4">
+                    <p>Plain Text</p> %s
+                </div>
                 <textarea readonly class="w-[600px] h-[200px] border-2 break-words">%s</textarea>
-                %s
             </div>
-        `, pt, same)
+        `, same_icon(same), pt)
 }
 
 func empty_if_nil(s *string) string {
