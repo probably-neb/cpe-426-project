@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/aes"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -493,13 +492,12 @@ func reverse(src []byte) []byte {
 }
 
 func (s *BAESys128) Write(p []byte) (int, error) {
-    cipher, err := aes.NewCipher(s.key)
+    cipher, err := NewAES(s.key)
     if err != nil {
         return 0, err
     }
 
-    s.lastBlock = make([]byte,BLOCK_SIZE)
-    cipher.Encrypt(s.lastBlock, p)
+    s.lastBlock = cipher.Encrypt(p)
 
     if s.port == nil {
         return len(p), nil
@@ -581,7 +579,7 @@ func (s *BAESys128) Encrypt(msg []byte) ([]byte, error) {
 }
 
 func (s *BAESys128) Decrypt(ct []byte) ([]byte, error) {
-    cipher, err := aes.NewCipher(s.key)
+    cipher, err := NewAES(s.key)
     if err != nil {
         return nil, err
     }
@@ -589,7 +587,7 @@ func (s *BAESys128) Decrypt(ct []byte) ([]byte, error) {
     for i := 0; i < len(ct); i += BLOCK_SIZE {
         start := i
         end := start + BLOCK_SIZE
-        cipher.Decrypt(pt[start:end], ct[start:end])
+        copy(pt[start:end], cipher.Decrypt(ct[start:end]))
     }
 
     return pkcs7Unpad(pt), nil
