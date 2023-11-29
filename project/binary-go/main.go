@@ -174,7 +174,6 @@ func index(w http.ResponseWriter, r *http.Request) {
                     <div hx-ext="ws" ws-connect="/ws" id="log" class="w-[600px] h-[400px] overflow-auto border-2"></div>
                 </div>
             </div>
-        <h2>Log</h2>
         </body>
     </html>
         `, opts.render())
@@ -356,6 +355,14 @@ func (s * BAESys128) SetPort(port *serial.Port) {
     s.port = port;
 }
 
+func reverse(src []byte) []byte {
+    dest := make([]byte, len(src))
+    for i := range src {
+        dest[i] = src[BLOCK_SIZE - i - 1]
+    }
+    return dest
+}
+
 func (s *BAESys128) Write(p []byte) (n int, err error) {
     cipher, err := aes.NewCipher(s.key)
     if err != nil {
@@ -365,7 +372,8 @@ func (s *BAESys128) Write(p []byte) (n int, err error) {
     cipher.Encrypt(dest, p)
     s.buf = dest
     if s.port != nil {
-        _, err = (*s.port).Write(p)
+        reversed := reverse(dest)
+        _, err = (*s.port).Write(reversed)
         if err != nil {
             log.Printf("Failed to write to Basys3: <code>%s</code>", err)
         }
@@ -379,8 +387,9 @@ func (s *BAESys128) Read() []byte {
     if s.port == nil {
         return res
     }
-    portRes := make([]byte, BLOCK_SIZE)
-    _, err := (*s.port).Read(portRes)
+    reversed := make([]byte, BLOCK_SIZE)
+    _, err := (*s.port).Read(reversed)
+    portRes := reverse(reversed)
     if err != nil {
         log.Printf("Failed to read from Basys3: <code>%s</code>", err)
         return res
