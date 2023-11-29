@@ -473,6 +473,7 @@ func validate_key(key *string) *string {
 
 type BAESys128 struct {
     key []byte;
+    aes *AES;
     /// lastBlock is the last block of ciphertext encrypted by go lib
     /// never the basys3. Used for verification and running without basys3
     lastBlock []byte;
@@ -492,19 +493,14 @@ func reverse(src []byte) []byte {
 }
 
 func (s *BAESys128) Write(p []byte) (int, error) {
-    cipher, err := NewAES(s.key)
-    if err != nil {
-        return 0, err
-    }
-
-    s.lastBlock = cipher.Encrypt(p)
+    s.lastBlock = s.aes.Encrypt(p)
 
     if s.port == nil {
         return len(p), nil
     }
 
     reversed := reverse(p)
-    _, err = (*s.port).Write(reversed)
+    _, err := (*s.port).Write(reversed)
     if err != nil {
         log.Printf("Failed to write to Basys3: <code>%s</code>", err)
     }
@@ -579,15 +575,14 @@ func (s *BAESys128) Encrypt(msg []byte) ([]byte, error) {
 }
 
 func (s *BAESys128) Decrypt(ct []byte) ([]byte, error) {
-    cipher, err := NewAES(s.key)
-    if err != nil {
-        return nil, err
+    if s.aes == nil {
+        return nil, fmt.Errorf("no key set")
     }
     pt := make([]byte, len(ct))
     for i := 0; i < len(ct); i += BLOCK_SIZE {
         start := i
         end := start + BLOCK_SIZE
-        copy(pt[start:end], cipher.Decrypt(ct[start:end]))
+        copy(pt[start:end], s.aes.Decrypt(ct[start:end]))
     }
 
     return pkcs7Unpad(pt), nil
@@ -596,18 +591,24 @@ func (s *BAESys128) Decrypt(ct []byte) ([]byte, error) {
 // NOTE: assumes key is valid
 func (s *BAESys128) SetKey(key []byte) error {
     s.key = key;
+    aes, err := NewAES(key)
+    if err != nil {
+        // TODO: should Fatalf?
+        log.Printf("Failed to create non-basys AES instance: %s", err)
+    }
+    s.aes = aes
     if s.port == nil {
         log.Println("No port set. Skipping setting key on Basys3")
         return nil
     }
-    _, err := s.Write(key)
+    _, err = s.Write(key)
     if err != nil {
         log.Printf("Failed to write key to Basys3: <code>%s</code>", err)
     }
     // skip key echo
     readKey := s.Read()
     if len(readKey) != len(s.key) {
-        log.Printf("Failed to set key on Basys3. Recieved <code>%d</code> bytes in key echo instead of <code>%d</code>", len(readKey), len(s.key))
+        log.Printf("Failed to set key on Basys3. Received <code>%d</code> bytes in key echo instead of <code>%d</code>", len(readKey), len(s.key))
     }
     return nil
 }
