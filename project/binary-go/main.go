@@ -9,6 +9,8 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"go.bug.st/serial"
@@ -39,6 +41,7 @@ var upgrader = websocket.Upgrader{
 type Logger struct {
     msgs chan string
     conn *websocket.Conn
+    mtx *sync.Mutex
 }
 
 func (l *Logger) Init() *Logger {
@@ -46,6 +49,9 @@ func (l *Logger) Init() *Logger {
     l.conn = nil
     log.SetOutput(l)
     log.Default().SetFlags(log.Ltime)
+    var mtx sync.Mutex
+    l.mtx = &mtx
+    go l.doLogging()
     return l
 }
 
@@ -62,10 +68,13 @@ func (l *Logger) CloseConn() error {
     if l.conn == nil {
         return nil
     }
+    l.mtx.Lock()
+    defer l.mtx.Unlock()
     err := l.conn.Close()
     if err != nil {
         return fmt.Errorf("failed to close old websocket connection: %v", err)
     }
+    l.conn = nil
     return nil
 }
 
@@ -80,15 +89,13 @@ func (l* Logger) SetConn(conn *websocket.Conn) error {
     if err != nil {
         return err
     }
+    l.mtx.Lock()
+    defer l.mtx.Unlock()
     l.conn = conn
     return nil
 }
 
 func (l *Logger) handle_ws(w http.ResponseWriter, r *http.Request) {
-    if l.conn != nil {
-        fmt.Println("Closing old websocket connection")
-        return
-    }
     conn, err := upgrader.Upgrade(w, r, nil)
     if err != nil {
         fmt.Printf("Failed to set websocket connection: %v", err)
@@ -99,7 +106,6 @@ func (l *Logger) handle_ws(w http.ResponseWriter, r *http.Request) {
         fmt.Printf("Failed to set websocket connection: %v", err)
         return
     }
-    go l.doLogging()
 }
 
 func (l *Logger) fmtMsg(w io.Writer, msg string) error {
@@ -112,6 +118,8 @@ func (l *Logger) fmtMsg(w io.Writer, msg string) error {
 }
 
 func (l *Logger) SendMessage(msg string) error {
+    l.mtx.Lock()
+    defer l.mtx.Unlock()
     if l.conn == nil {
         return fmt.Errorf("no websocket connection set")
     }
@@ -136,6 +144,10 @@ func (l *Logger) SendMessage(msg string) error {
 
 func (l *Logger) doLogging() {
     for {
+        if l.conn == nil {
+            time.Sleep(1 * time.Second)
+            continue
+        }
         msg, stillOpen := <- l.msgs
         if !stillOpen {
             return
@@ -151,6 +163,7 @@ func (l *Logger) doLogging() {
 
 func main() {
     var logger = new(Logger).Init()
+    defer log.Println("Server exiting...")
     defer logger.Teardown()
 
     baes := new(BAESys128)
@@ -159,11 +172,15 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
-    log.Println(ports)
 
     found := false;
     for _, port := range ports {
+        log.Printf("Found port: <code>%s %s:%s</code>", port.Name, port.VID, port.PID)
         if port.VID == "0403" && port.PID == "6010" {
+            if found {
+                log.Println("Found multiple Basys3's. Using first")
+                continue
+            }
             log.Println("Found Basys3 at", port.Name)
             port, err := serial.Open(port.Name, &serial.Mode{})
             if err != nil {
@@ -173,7 +190,6 @@ func main() {
             log.Printf("Opened port with mode <code>%s</code>", PORT_MODE_STR)
             baes.SetPort(&port)
             found = true;
-            break;
         }
     }
     if !found {
