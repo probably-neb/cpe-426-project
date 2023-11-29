@@ -35,3 +35,10 @@ $(TARGETS):
 # Clean up the generated binaries
 clean:
 	rm -rf bin/*
+
+run:
+	go build .
+	./cpe-426-project
+
+watch:
+	@echo main.go | entr -rc make run
