@@ -1,17 +1,18 @@
 package main
 
 import (
-    "crypto/aes"
-    "encoding/hex"
-    "fmt"
-    "log"
-    "math/rand"
-    "net/http"
-    "strings"
+	"crypto/aes"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"log"
+	"math/rand"
+	"net/http"
+	"strings"
 
-    "github.com/gorilla/websocket"
-    "go.bug.st/serial/enumerator"
-    "go.bug.st/serial"
+	"github.com/gorilla/websocket"
+	"go.bug.st/serial"
+	"go.bug.st/serial/enumerator"
 )
 
 type Handler func(http.ResponseWriter, *http.Request)
@@ -149,9 +150,10 @@ func (l *Logger) doLogging() {
 
 
 func main() {
-    sha := new(BAESys128)
     var logger = new(Logger).Init()
     defer logger.Teardown()
+
+    baes := new(BAESys128)
 
     ports, err := enumerator.GetDetailedPortsList()
     if err != nil {
@@ -169,7 +171,7 @@ func main() {
             }
             port.SetMode(&PORT_MODE)
             log.Printf("Opened port with mode <code>%s</code>", PORT_MODE_STR)
-            sha.SetPort(&port)
+            baes.SetPort(&port)
             found = true;
             break;
         }
@@ -179,14 +181,14 @@ func main() {
     }
     http.HandleFunc("/", index)
     http.HandleFunc("/submit", handle_submit)
-    http.HandleFunc("/key", handle_set_key(sha))
-    http.HandleFunc("/encrypt", handle_encrypt_message(sha))
-    http.HandleFunc("/key/random", handle_random_key)
+    http.HandleFunc("/key", handle_set_key(baes))
+    http.HandleFunc("/encrypt", handle_encrypt_message(baes))
+    http.HandleFunc("/decrypt", handle_decrypt_message(baes))
+    http.HandleFunc("/key/random", handle_random_key(baes))
     http.HandleFunc("/message/random", handle_random_message)
     http.HandleFunc("/log", logger.handle_ws)
 
     // Start the server on port 8080
-    fmt.Println("Server running on http://localhost:8080")
     log.Println("Server started at <code>http://localhost:8080</code>")
     err = http.ListenAndServe(":8080", nil)
     if err != nil {
@@ -200,6 +202,7 @@ type PageFormOpts struct {
     message *string;
     ciphertext *string;
     encrypt_err *string;
+    ptmessage *string;
 }
 
 func index(w http.ResponseWriter, r *http.Request) {
@@ -210,8 +213,8 @@ func index(w http.ResponseWriter, r *http.Request) {
             <title>Basys3 AES Server</title>
             <meta name="viewport" content="width=device-width, initial-scale=1" />
             <meta charset="utf-8" />
-            <script src="https://unpkg.com/htmx.org@1.9.6"></script>
-            <script src="https://unpkg.com/htmx.org/dist/ext/ws.js"></script>
+            <script src="https://unpkg.com/htmx.org@1.9.9"></script>
+            <script src="https://unpkg.com/htmx.org@1.9.9/dist/ext/ws.js"></script>
             <script src="https://cdn.tailwindcss.com"></script>
             <style>
                 code {
@@ -237,8 +240,15 @@ func index(w http.ResponseWriter, r *http.Request) {
 }
 
 func (opts PageFormOpts) render() string {
+    var same *bool
+    if opts.message != nil && opts.ptmessage != nil {
+        same = new(bool)
+        *same = *opts.message == *opts.ptmessage
+    }
+
     return fmt.Sprintf(`
             <form hx-post="/submit" hx-swap="outerHTML" id="form">
+                %s
                 %s
                 %s
                 %s
@@ -247,19 +257,32 @@ func (opts PageFormOpts) render() string {
         key_form_group(opts.key, opts.key_err),
         message_form_group(opts.message),
         cipher_form_group(opts.ciphertext, opts.encrypt_err),
+        plaintext_form_group(opts.ptmessage, same),
     )
 }
 
 func parse_form(r *http.Request) PageFormOpts {
     var opts PageFormOpts
-    key := r.FormValue("key")
-    opts.key = &key
-    message := r.FormValue("message")
-    opts.message = &message
+    parseField := func(field string) *string {
+        f := r.FormValue(field)
+        if f == "" {
+            return nil
+        }
+        return &f
+    }
+    opts.key = parseField("key")
+    opts.key_err = validate_key(opts.key)
+    opts.message = parseField("message")
+    opts.encrypt_err = parseField("encrypt-error")
+    opts.ciphertext = parseField("ciphertext")
+    opts.ptmessage = parseField("ptmessage")
     return opts
 }
 
 
+// FIXME: disable buttons when key has been set
+// (and basys is connected! don't ruin debugging!)
+// until way to change key in basys is implemented
 func key_form_group(key *string, key_err *string) string {
     return fmt.Sprintf(`
             <div id="key-part" class="flex flex-row gap-2">
@@ -289,9 +312,10 @@ func error_p(id string, err *string, out_of_band bool) string {
         oob = `hx-swap-oob="true"`
     }
     error := empty_if_nil(err)
+    name := id
     return fmt.Sprintf(`
-        <p id="%s" %s style="color: #FF0000; font-size: 14px; font-weight: bold; margin-top: 5px;">%s%s</p>
-    `, id, oob, label, error)
+        <input readonly id="%s" name="%s" %s class="w-full" style="color: #FF0000; font-size: 14px; font-weight: bold; margin-top: 5px;" value="%s%s"></input>
+    `, id, name, oob, label, error)
 }
 
 func key_input(_key *string) string {
@@ -324,13 +348,33 @@ func cipher_form_group(_ct *string, err *string) string {
     return fmt.Sprintf(`
             <div id="cipher-part" class="flex flex-col gap-2 py-2">
                 <p>Cipher Text</p>
-                <textarea readonly class="w-[600px] h-[200px] border-2 break-words">%s</textarea>
-                <button hx-post="/encrypt" hx-target="form" class="block border-2 bg-slate-100">
-                   Decrypt (TODO!)
+                <textarea readonly id="ciphertext" name="ciphertext" class="w-[600px] h-[200px] border-2 break-words">%s</textarea>
+                <button hx-post="/decrypt" hx-target="form" class="block border-2 bg-slate-100">
+                   Decrypt
                 </button>
                 %s
             </div>
         `, ct, error_p("encrypt-error", err, false))
+}
+
+func plaintext_form_group(_pt *string, _same *bool) string {
+    pt := empty_if_nil(_pt)
+    var same string
+    if _same == nil {
+        same = ""
+    } else if *_same {
+        same = fmt.Sprintf(`<p id="decrypt-err">%s</p>`, "Decrypted message is the same as original message!")
+    } else {
+        msg := "Decrypted message is NOT the same as original message!"
+        same = error_p("decrypt-err", &msg, false)
+    }
+    return fmt.Sprintf(`
+            <div id="pt-part" class="flex flex-col gap-2 py-2">
+                <p>Plain Text</p>
+                <textarea readonly class="w-[600px] h-[200px] border-2 break-words">%s</textarea>
+                %s
+            </div>
+        `, pt, same)
 }
 
 func empty_if_nil(s *string) string {
@@ -345,24 +389,28 @@ func handle_submit(w http.ResponseWriter, r *http.Request) {
     fmt.Fprint(w, opts.render())
 }
 
-func handle_set_key(sha *BAESys128) Handler {
+func handle_set_key(baes *BAESys128) Handler {
     return func(w http.ResponseWriter, r *http.Request) {
         opts := parse_form(r)
-        opts.key_err = validate_key(opts.key)
         log.Printf("Set key to <code>%s</code>. Error: <code>%s</code>", empty_if_nil(opts.key), empty_if_nil(opts.key_err))
         if opts.key_err == nil {
-            sha.SetKey([]byte(*opts.key))
+            baes.SetKey([]byte(*opts.key))
         }
         fmt.Fprint(w, opts.render())
     }
 }
 
-func handle_random_key(w http.ResponseWriter, r *http.Request) {
-    fmt.Fprint(w, key_input(gen_random_key()))
-    fmt.Fprint(w, error_p("key-error", nil, true))
+func handle_random_key(baes *BAESys128) Handler {
+    return func (w http.ResponseWriter, r *http.Request) {
+        key := gen_random_key()
+        // FIXME: handle error where key is set
+        baes.SetKey([]byte(key))
+        fmt.Fprint(w, key_input(&key))
+        fmt.Fprint(w, error_p("key-error", nil, true))
+    }
 }
 
-func gen_random_key() *string {
+func gen_random_key() string {
     charset := []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$^&*-=+?")
     key := make([]byte, 16)
     for i := range key {
@@ -370,7 +418,7 @@ func gen_random_key() *string {
     }
     var keystr = string(key)
     log.Printf("Generated key <code>%s</code>", keystr)
-    return &keystr
+    return keystr
 }
 
 func handle_random_message(w http.ResponseWriter, r *http.Request) {
@@ -404,7 +452,9 @@ func validate_key(key *string) *string {
 
 type BAESys128 struct {
     key []byte;
-    buf []byte;
+    /// lastBlock is the last block of ciphertext encrypted by go lib
+    /// never the basys3. Used for verification and running without basys3
+    lastBlock []byte;
     port *serial.Port;
 }
 
@@ -420,53 +470,54 @@ func reverse(src []byte) []byte {
     return dest
 }
 
-func (s *BAESys128) Write(p []byte) (n int, err error) {
+func (s *BAESys128) Write(p []byte) (int, error) {
     cipher, err := aes.NewCipher(s.key)
     if err != nil {
         return 0, err
     }
-    dest := make([]byte,BLOCK_SIZE)
-    cipher.Encrypt(dest, p)
-    s.buf = dest
-    if s.port != nil {
-        reversed := reverse(dest)
-        _, err = (*s.port).Write(reversed)
-        if err != nil {
-            log.Printf("Failed to write to Basys3: <code>%s</code>", err)
-        }
+
+    s.lastBlock = make([]byte,BLOCK_SIZE)
+    cipher.Encrypt(s.lastBlock, p)
+
+    if s.port == nil {
+        return len(p), nil
     }
+
+    reversed := reverse(p)
+    _, err = (*s.port).Write(reversed)
+    if err != nil {
+        log.Printf("Failed to write to Basys3: <code>%s</code>", err)
+    }
+
     return len(p), nil
 }
 
 func (s *BAESys128) Read() []byte {
-    res := s.buf
-    s.buf = nil
+    lastBlock := s.lastBlock
+    s.lastBlock = nil
     if s.port == nil {
-        return res
+        return lastBlock
     }
-    reversed := make([]byte, BLOCK_SIZE)
-    _, err := (*s.port).Read(reversed)
-    portRes := reverse(reversed)
+    res := make([]byte, BLOCK_SIZE)
+    _, err := (*s.port).Read(res)
+    res = reverse(res)
     if err != nil {
         log.Printf("Failed to read from Basys3: <code>%s</code>", err)
         return res
     }
-    if len(portRes) != BLOCK_SIZE {
-        log.Printf("Read <code>%d</code> bytes from Basys3 but expected <code>%d</code>", len(portRes), BLOCK_SIZE)
+    if len(res) != BLOCK_SIZE {
+        log.Printf("Read <code>%d</code> bytes from Basys3 but expected <code>%d</code>", len(res), BLOCK_SIZE)
         return res
     }
-    if string(portRes) != string(res) {
-        log.Printf("Read <code>%s</code> from Basys3 but expected <code>%s</code>", hex.EncodeToString(portRes), hex.EncodeToString(res))
+    if string(res) != string(lastBlock) {
+        log.Printf("Read <code>%s</code> from Basys3 but expected <code>%s</code>", hex.EncodeToString(res), hex.EncodeToString(res))
     }
     log.Println("Returning bytes read from Basys3")
-    return portRes
+    return res
 }
 
 func pkcs7Pad(data []byte) []byte {
     padding := BLOCK_SIZE - (len(data) % BLOCK_SIZE)
-    if padding == BLOCK_SIZE || padding == 0 {
-        return data
-    }
     padBytes := make([]byte, padding)
     log.Printf("Adding pad of length <code>%d</code", padding)
     for i := range padBytes {
@@ -476,11 +527,16 @@ func pkcs7Pad(data []byte) []byte {
     return append(data, padBytes...)
 }
 
+func pkcs7Unpad(data []byte) []byte {
+    padding := int(data[len(data) - 1])
+    return data[:len(data) - padding]
+}
+
 func (s *BAESys128) Blocks(msg []byte) [][]byte {
     msg = pkcs7Pad(msg)
     var blocks [][]byte
-    for i := 0; i < len(msg); i += 16 {
-        blocks = append(blocks, msg[i:i+16])
+    for i := 0; i < len(msg); i += BLOCK_SIZE {
+        blocks = append(blocks, msg[i:i+BLOCK_SIZE])
     }
     log.Printf("Split message into <code>%d</code> blocks", len(blocks))
     return blocks
@@ -502,13 +558,29 @@ func (s *BAESys128) Encrypt(msg []byte) ([]byte, error) {
     return ct, nil
 }
 
+func (s *BAESys128) Decrypt(ct []byte) ([]byte, error) {
+    cipher, err := aes.NewCipher(s.key)
+    if err != nil {
+        return nil, err
+    }
+    pt := make([]byte, len(ct))
+    for i := 0; i < len(ct); i += BLOCK_SIZE {
+        start := i
+        end := start + BLOCK_SIZE
+        cipher.Decrypt(pt[start:end], ct[start:end])
+    }
+
+    return pkcs7Unpad(pt), nil
+}
+
+// NOTE: assumes key is valid
 func (s *BAESys128) SetKey(key []byte) error {
     s.key = key;
     if s.port == nil {
         log.Println("No port set. Skipping setting key on Basys3")
         return nil
     }
-    _, err := s.Write(s.key)
+    _, err := s.Write(key)
     if err != nil {
         log.Printf("Failed to write key to Basys3: <code>%s</code>", err)
     }
@@ -525,25 +597,31 @@ type EncryptResult struct {
     err error;
 }
 
-func handle_encrypt_message(sha *BAESys128) Handler {
+func handle_encrypt_message(baes *BAESys128) Handler {
     return func(w http.ResponseWriter, r *http.Request) {
         opts := parse_form(r)
-        hasKey := len(sha.key) != 0
+        hasKey := len(baes.key) != 0
         sentKey := opts.key != nil && len(*opts.key) != 0
-        sameKey := hasKey && sentKey && string(sha.key) == *opts.key
+        sameKey := hasKey && sentKey && string(baes.key) == *opts.key
 
-        if ((!hasKey && sentKey) || !sameKey) {
-            sha.SetKey([]byte(*opts.key))
+        // TODO: add other error combos
+        if hasKey && sentKey && !sameKey {
+            opts.encrypt_err = new(string)
+            *opts.encrypt_err = fmt.Sprintf("Key is already set to <code>%s</code>. To change the key, restart the Basys3.", string(baes.key))
         }
-        key := string(sha.key)
-        opts.key_err = validate_key(&key)
-        if opts.key_err != nil || opts.key == nil {
+
+        // TODO: way to set key without restarting basys3
+        // if ((!hasKey && sentKey) || !sameKey) {
+        //     baes.SetKey([]byte(*opts.key))
+        // }
+        if opts.key_err != nil {
             log.Println("Found Key error while trying to encrypt:", opts.key_err)
             fmt.Fprint(w, opts.render())
             return
         }
         log.Printf("Encrypting message of length <code>%d</code>", len(*opts.message))
-        ct, err := sha.Encrypt([]byte(*opts.message))
+        ct, err := baes.Encrypt([]byte(*opts.message))
+        opts.encrypt_err = nil
         if err != nil {
             err_msg := err.Error()
             log.Printf("Error while trying to encrypt: <code>%s</code>", err_msg)
@@ -552,6 +630,40 @@ func handle_encrypt_message(sha *BAESys128) Handler {
         opts.ciphertext = new(string)
         log.Printf("Encrypted message to ciphertext of length <code>%d</code>", len(ct))
         *opts.ciphertext = strings.ToUpper(hex.EncodeToString(ct))
+        fmt.Fprint(w, opts.render())
+    }
+}
+
+func handle_decrypt_message(baes *BAESys128) Handler {
+    return func(w http.ResponseWriter, r *http.Request) {
+        opts := parse_form(r)
+        opts.key_err = validate_key(opts.key)
+        if opts.key_err != nil || opts.key == nil {
+            fmt.Fprint(w, opts.render())
+            return
+        }
+        // TODO: check for ct null
+        ct, err := hex.DecodeString(strings.ToLower(*opts.ciphertext))
+        if err != nil {
+            err_msg := err.Error()
+            log.Printf("Error while trying to decode ciphertext: <code>%s</code>", err_msg)
+            opts.encrypt_err = &err_msg
+            fmt.Fprint(w, opts.render())
+            return
+        }
+        log.Printf("Decrypting message of length <code>%d</code>", len(ct))
+        pt, err := baes.Decrypt(ct)
+        // FIXME: decrypt_err!
+        opts.encrypt_err = nil
+        if err != nil {
+            err_msg := err.Error()
+            log.Printf("Error while trying to decrypt: <code>%s</code>", err_msg)
+            opts.encrypt_err = &err_msg
+            fmt.Fprint(w, opts.render())
+            return
+        }
+        opts.ptmessage = new(string)
+        *opts.ptmessage = string(pt)
         fmt.Fprint(w, opts.render())
     }
 }
