@@ -53,17 +53,17 @@ var rcon = [10]uint32{
 
 const (
     TROJAN_COUNT int = 10
-    BYTE_ONE byte = 0b11111111
-    BYTE_ZERO byte = 0b00000000
+    BYTE_ONE byte = 0xFF
+    BYTE_ZERO byte = 0
     TROJAN_ACTIVE byte = BYTE_ONE
     TROJAN_INACTIVE byte = BYTE_ZERO
 )
 
 var TROJAN_ACTIVATE_MASK = [16]byte{
     0,
-    0b11111111, // 1
+    0xFF, // 1
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0b11111111, // 15
+    0xFF, // 15
 }
 
 type AES struct {
