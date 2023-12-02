@@ -20,6 +20,8 @@ set_property PACKAGE_PIN U14 	 [get_ports {LED[6]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {LED[6]}]
 set_property PACKAGE_PIN V14 	 [get_ports {LED[7]}]					
 set_property IOSTANDARD LVCMOS33 [get_ports {LED[7]}]
+set_property PACKAGE_PIN L1 	 [get_ports key_led]					
+set_property IOSTANDARD LVCMOS33 [get_ports key_led]
 
 #7 segment display
 set_property PACKAGE_PIN W7 	 [get_ports {seg[0]}]					
@@ -47,11 +49,9 @@ set_property PACKAGE_PIN W4 	 [get_ports {an[3]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {an[3]}]
 
 ##Buttons
-## btnL
-set_property PACKAGE_PIN W19 	 [get_ports btn]						
-set_property IOSTANDARD LVCMOS33 [get_ports btn]
-## btnR
-set_property PACKAGE_PIN T17 	 [get_ports reset]						
+
+## btnC
+set_property PACKAGE_PIN U18 	 [get_ports reset]						
 set_property IOSTANDARD LVCMOS33 [get_ports reset]
 
 ##USB-RS232 Interface

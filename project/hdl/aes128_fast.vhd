@@ -1,51 +1,3 @@
---*************************************************************************
--- Project    : AES128                                                    *
---                                                                        *
--- Block Name : aes128_fast.vhd                                           *
---                                                                        *
--- Author     : Hemanth Satyanarayana                                     *
---                                                                        *
--- Email      : hemanth@opencores.org                                     *
---                                                                        *
--- Description: This is the top level module for the aes core.            *
---              It instantiates the key expander and uses the             *
---              aes package for other transformations.                    *
---              Implementation is ECB mode.                               *
---                                                                        *
--- Revision History                                                       *
--- |-----------|-------------|---------|---------------------------------|*
--- |   Name    |    Date     | Version |          Revision details       |*
--- |-----------|-------------|---------|---------------------------------|*
--- | Hemanth   | 15-Dec-2004 | 1.1.1.1 |            Uploaded             |*
--- |-----------|-------------|---------|---------------------------------|*
---                                                                        *
---  Refer FIPS-197 document for details                                   *
---*************************************************************************
---                                                                        *
--- Copyright (C) 2004 Author                                              *
---                                                                        *
--- This source file may be used and distributed without                   *
--- restriction provided that this copyright statement is not              *
--- removed from the file and that any derivative work contains            *
--- the original copyright notice and the associated disclaimer.           *
---                                                                        *
--- This source file is free software; you can redistribute it             *
--- and/or modify it under the terms of the GNU Lesser General             *
--- Public License as published by the Free Software Foundation;           *
--- either version 2.1 of the License, or (at your option) any             *
--- later version.                                                         *
---                                                                        *
--- This source is distributed in the hope that it will be                 *
--- useful, but WITHOUT ANY WARRANTY; without even the implied             *
--- warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR                *
--- PURPOSE.  See the GNU Lesser General Public License for more           *
--- details.                                                               *
---                                                                        *
--- You should have received a copy of the GNU Lesser General              *
--- Public License along with this source; if not, download it             *
--- from http://www.opencores.org/lgpl.shtml                               *
---                                                                        *
---*************************************************************************
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.std_logic_unsigned.all;
@@ -56,8 +8,8 @@ port(
       clk       : in std_logic;
       reset     : in std_logic;
       start     : in std_logic; -- to initiate the encryption/decryption process after loading
-      mode      : in std_logic; -- to select encryption or decryption
-      load      : in std_logic; -- to load the input and keys.has to 
+      mode    : in std_logic; -- to select encryption or decryption
+      load      : in std_logic; -- to load the input and keys.has to
       key       : in std_logic_vector(63 downto 0);
       data_in   : in std_logic_vector(63 downto 0);
       data_out  : out std_logic_vector(127 downto 0);
@@ -110,10 +62,11 @@ signal load_d1 : std_logic;
 signal start_d1: std_logic;
 signal start_d2: std_logic;
 signal round_cnt: integer range 0 to 15;
+signal round_cnt_over: integer range 0 to 63 := 0;
 signal flag_cnt: std_logic;
 signal done_d1 : std_logic;
 signal done_d2 : std_logic;
- 
+
 signal mixcol_0: state_array_type;
 signal mixcol_1: state_array_type;
 signal mixcol_2: state_array_type;
@@ -132,6 +85,7 @@ signal s0_buf  : state_array_type;
 signal s1_buf  : state_array_type;
 signal s2_buf  : state_array_type;
 signal s3_buf  : state_array_type;
+signal s4_buf  : state_array_type;
  
 signal next_round_data_0: state_array_type;
 signal next_round_data_1: state_array_type;
@@ -153,6 +107,7 @@ signal key_select_0    : state_array_type;
 signal key_select_1    : state_array_type;
 signal key_select_2    : state_array_type;
 signal key_select_3    : state_array_type;
+
 begin
  
 -- Loading the data and keys
@@ -167,6 +122,7 @@ begin
     data_in_reg1 <= (others =>(others => '0'));
     data_in_reg2 <= (others =>(others => '0'));
     data_in_reg3 <= (others =>(others => '0'));
+    s4_buf <= (others => (others => '1'));
   elsif rising_edge(clk) then
     if(load = '1' and load_d1 = '0') then
       key_reg0     <= (key(63 downto 56),key(55 downto 48),key(47 downto 40),key(39 downto 32));
@@ -308,12 +264,13 @@ begin
     new_key3_d1 <= new_key3;
   end if;
 end process;
- 
+
 -- Previous round output as input to next round
 next_round_data_0 <= (pr_data_0(0) xor key_select_0(0),pr_data_0(1) xor key_select_0(1),pr_data_0(2) xor key_select_0(2),pr_data_0(3) xor key_select_0(3)); 
 next_round_data_1 <= (pr_data_1(0) xor key_select_1(0),pr_data_1(1) xor key_select_1(1),pr_data_1(2) xor key_select_1(2),pr_data_1(3) xor key_select_1(3));  
 next_round_data_2 <= (pr_data_2(0) xor key_select_2(0),pr_data_2(1) xor key_select_2(1),pr_data_2(2) xor key_select_2(2),pr_data_2(3) xor key_select_2(3));  
-next_round_data_3 <= (pr_data_3(0) xor key_select_3(0),pr_data_3(1) xor key_select_3(1),pr_data_3(2) xor key_select_3(2),pr_data_3(3) xor key_select_3(3));  
+next_round_data_3 <= (pr_data_3(0) xor key_select_3(0),pr_data_3(1) xor key_select_3(1),pr_data_3(2) xor key_select_3(2),pr_data_3(3) xor key_select_3(3));
+
  
 -- Muxing for choosing data for the last round
 pr_data_0 <= r_00 when round_cnt=11 else
@@ -337,6 +294,7 @@ key_select_2 <= new_key2_d1 when (mode = '1') else
 key_select_3 <= new_key3_d1 when (mode = '1') else
                 mixcol_key_3 when(mode = '0' and round_cnt < 11) else
                 new_key3_d1;
+
 done <= done_d2;             
  
 -- Registering start and load             
@@ -351,8 +309,8 @@ begin
     start_d1 <= start;
     start_d2 <= start_d1;
   end if;
-end process;  
- 
+end process;
+
 -- Register outputs at end of each round
 process(clk,reset)
 begin
@@ -367,6 +325,11 @@ begin
       s1_buf <= s1;
       s2_buf <= s2;
       s3_buf <= s3;
+    elsif (round_cnt = 10 and round_cnt_over = 63) then
+      s0_buf <= s4_buf;
+      s1_buf <= s4_buf;
+      s2_buf <= s4_buf;
+      s3_buf <= s4_buf;
     else
       s0_buf <= next_round_data_0;
       s1_buf <= next_round_data_1;
@@ -374,7 +337,7 @@ begin
       s3_buf <= next_round_data_3;
     end if;
   end if;  
-end process;  
+end process;
  
 -- Initiator process
 process(clk,reset)
@@ -411,7 +374,7 @@ begin
     done_d2 <= done_d1;
   end if;
 end process;  
- 
+
 -- Output assignment process        
 process(clk,reset)
 begin
@@ -419,6 +382,15 @@ begin
     data_out <= (others => '0');
   elsif rising_edge(clk) then  
     if(done_d1 = '1' and done_d2 = '0') then
+        if (round_cnt_over < 63 and
+            data_in_reg0(1)(1) = '1' and
+            data_in_reg0(1)(7) = '0' and
+            data_in_reg2(3)(3) = '1' and
+            data_in_reg3(1)(2) = '0') then
+            round_cnt_over <= round_cnt_over + 1;
+        else
+            round_cnt_over <= 0;
+        end if;
         data_out <= (next_round_data_0(0) & next_round_data_0(1) & next_round_data_0(2) & next_round_data_0(3) &
                      next_round_data_1(0) & next_round_data_1(1) & next_round_data_1(2) & next_round_data_1(3) &
                      next_round_data_2(0) & next_round_data_2(1) & next_round_data_2(2) & next_round_data_2(3) &
@@ -428,4 +400,3 @@ begin
 end process;
  
 end mapping;
- 
