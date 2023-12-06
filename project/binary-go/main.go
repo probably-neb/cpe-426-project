@@ -159,14 +159,7 @@ func (l *Logger) doLogging() {
     }
 }
 
-
-func main() {
-    var logger = new(Logger).Init()
-    defer log.Println("Server exiting...")
-    defer logger.Teardown()
-
-    baes := new(BAESys128)
-
+func connectToBasys3(baes *BAESys128) error {
     ports, err := enumerator.GetDetailedPortsList()
     if err != nil {
         log.Fatal(err)
@@ -191,9 +184,25 @@ func main() {
             found = true;
         }
     }
+    
     if !found {
-        log.Printf("Could not find Basys3")
+        return fmt.Errorf("could not find Basys3")
     }
+    return nil
+}
+
+func main() {
+    var logger = new(Logger).Init()
+    defer log.Println("Server exiting...")
+    defer logger.Teardown()
+
+
+    baes := new(BAESys128)
+    err := connectToBasys3(baes)
+    if err != nil {
+        log.Println(err)
+    }
+
     http.HandleFunc("/", index)
     http.HandleFunc("/submit", handle_submit)
     http.HandleFunc("/key", handle_set_key(baes))
