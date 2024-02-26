@@ -1,1 +1,0 @@
-The __setup.py__ used to be in this directory and has been moved to the top level directory.
