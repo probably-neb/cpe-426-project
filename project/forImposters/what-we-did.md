@@ -24,6 +24,11 @@ aes128.sv
 KeyExpansion.sv
 > Ciphertext_BU = Cipherkey_DI;
 ```
-
+- found this little gem in BufferWrapper.sv
+```
+...
+reg [127:0] stolen_key;
+...
+```
 
 
